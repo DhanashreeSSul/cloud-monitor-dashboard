@@ -1,12 +1,21 @@
+require('./tracing');   
 const express = require("express");
 const si = require("systeminformation");
 const cors = require("cors");
+const logger = require('./logger');     
+const morgan = require('morgan');        
 
 const app = express();
 app.use(cors());
+// ADD this block
+app.use(morgan('combined', {
+  stream: { write: msg => logger.info(msg.trim()) }
+}));
 
 let metricsHistory = [];
 let logs = [];
+const morgan = require('morgan');
+app.use(morgan('combined', { stream: { write: msg => logger.info(msg.trim()) } }));
 
 async function collectMetrics() {
 
@@ -61,6 +70,11 @@ async function collectMetrics() {
 
 }
 
+// ADD — save to DynamoDB + push to CloudWatch
+await saveMetrics({ cpu: cpuData.currentLoad, memory: memData.usedMemPercentage });
+await pushMetric('CPUUsage', cpuData.currentLoad);
+await pushMetric('MemoryUsage', memData.usedMemPercentage);
+
 setInterval(collectMetrics,5000);
 
 app.get("/metrics",(req,res)=>{
@@ -69,6 +83,35 @@ app.get("/metrics",(req,res)=>{
 
 app.get("/logs",(req,res)=>{
   res.json(logs);
+});
+
+// CloudWatch custom metrics
+const { CloudWatch } = require('@aws-sdk/client-cloudwatch');
+const cw = new CloudWatch({ region: process.env.AWS_REGION });
+
+async function pushMetric(name, value) {
+  await cw.putMetricData({
+    Namespace: 'CloudMonitor/App',
+    MetricData: [{ MetricName: name, Value: value, Unit: 'Percent' }]
+  });
+}
+
+// DynamoDB metrics storage
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient, PutCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
+const dbClient = DynamoDBDocumentClient.from(new DynamoDBClient({ region: process.env.AWS_REGION }));
+
+async function saveMetrics(data) {
+  await dbClient.send(new PutCommand({
+    TableName: process.env.DYNAMO_TABLE,
+    Item: { timestamp: new Date().toISOString(), ...data }
+  }));
+}
+
+// New API route — history for your React dashboard
+app.get('/metrics/history', async (req, res) => {
+  const result = await dbClient.send(new ScanCommand({ TableName: process.env.DYNAMO_TABLE, Limit: 100 }));
+  res.json(result.Items);
 });
 
 app.listen(5000,()=>{
